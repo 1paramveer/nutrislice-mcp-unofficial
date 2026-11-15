@@ -1,0 +1,12 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "nutrislice-mcp-unofficial",
+	"main": "src/server.ts",
+	"compatibility_date": "2026-11-15",
+	"kv_namespaces": [
+		{
+			"binding": "MENU_CACHE",
+			"id": "fc51ff142991440da2be53f627990a9a"
+		}
+	]
+}

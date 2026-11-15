@@ -2,6 +2,7 @@
   "dependencies": {
     "@modelcontextprotocol/node": "^2.1.2",
     "@modelcontextprotocol/server": "^2.4.0",
+    "agents": "^0.33.0",
     "dotenv": "^18.0.10",
     "tsx": "^4.23.15",
     "zod": "^4.6.7"
@@ -13,7 +14,9 @@
   "scripts": {
     "server:build:": "tsc",
     "server:build:watch:": "tsc --watch",
-    "server:dev": "tsx src/server.ts",
+
+    "server:dev": "wrangler dev",
+    "server:deploy": "wrangler deploy",
     "server:inspect": "npx @modelcontextprotocol/inspector"
   },
   "repository": {
@@ -34,6 +37,7 @@
   ],
   "devDependencies": {
     "@types/node": "^26.6.6",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "wrangler": "^4.162.0"
   }
 }

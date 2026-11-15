@@ -1,18 +1,15 @@
-import { createServer as createHttpServer } from "node:http";
-import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
-import {
-    hostHeaderValidation,
-    originValidation,
-    toNodeHandler,
-} from "@modelcontextprotocol/node";
+import { McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler } from "agents/mcp/server";
+import { env } from "cloudflare:workers";
 import { z } from "zod";
 
-// Keep a seven-day cache and basic limits on HTTP input and upstream waits.
+// Cache entries are fresh for 7 days and retained for 14 days.
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const KV_RETENTION_SECONDS = 14 * 24 * 60 * 60;
 const UPSTREAM_TIMEOUT_MS = 20_000;
 const MAX_MCP_REQUEST_BYTES = 256 * 1024;
 
-// Accept the district slug as supplied; the destination is checked before fetching.
+// Accept institution slugs as provided; validate the URL destination before fetching.
 const districtNameSchema = z.string().min(1);
 
 const days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
@@ -74,7 +71,7 @@ type DiningLocation = {
     availableMeals: { id: number; name: string; slug: string }[];
 };
 
-// Keep the complete food information provided by Nutrislice.
+// Keep the full Nutrislice food record, including nutrition and metadata.
 type FoodInfo = {
     id: number;
     name: string;
@@ -206,17 +203,17 @@ type RawWeeklyMenu = {
 };
 
 /**
- * Fetches Nutrislice JSON with a timeout and a fixed API destination.
- * This prevents malformed district names from sending requests elsewhere.
+ * Fetches JSON from Nutrislice with a timeout.
+ * Verifies the destination before allowing the outgoing request.
  *
  * @param url Nutrislice API URL.
- * @returns Parsed API response.
- * @throws If the destination is invalid or the request fails.
+ * @returns Parsed JSON response.
+ * @throws If the URL is invalid or the request fails.
  */
 async function fetchNutrisliceJson(url: string): Promise<unknown> {
     const target = new URL(url);
 
-    // Allow Nutrislice HTTPS API hosts only; do not follow redirects.
+    // Prevent requests to destinations outside Nutrislice.
     if (
         target.protocol !== "https:" ||
         !target.hostname.endsWith(".api.nutrislice.com") ||
@@ -229,7 +226,7 @@ async function fetchNutrisliceJson(url: string): Promise<unknown> {
 
     const response = await fetch(target, {
         signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-        redirect: "error",
+        redirect: "manual",
     });
 
     if (!response.ok) {
@@ -241,8 +238,9 @@ async function fetchNutrisliceJson(url: string): Promise<unknown> {
 
 /**
  * Fetches and normalizes dining locations for a district.
+ *
  * @param district_name Nutrislice district slug.
- * @returns Dining locations, or null if fetching or validation fails.
+ * @returns Dining locations, or null on failure.
  */
 async function getDiningLocations(
     district_name: string,
@@ -252,7 +250,7 @@ async function getDiningLocations(
             `https://${district_name}.api.nutrislice.com/menu/api/schools`,
         );
 
-        // Check the API response shape before converting it into dining locations.
+        // Check the basic response structure before processing it.
         if (
             !Array.isArray(raw) ||
             raw.some(
@@ -306,10 +304,12 @@ async function getDiningLocations(
 }
 
 /**
- * Extracts the menu fields used by the MCP tools from a weekly API response.
+ * Converts a Nutrislice weekly response into days and dining stations.
+ * Complete food records are preserved without duplicating their fields.
+ *
  * @param raw Weekly Nutrislice API response.
- * @returns A normalized weekly menu.
- * @throws If the response is missing required menu structure.
+ * @returns Normalized weekly menu.
+ * @throws If the expected menu structure is missing.
  */
 function parseWeeklyMenu(raw: unknown): WeeklyMenu {
     const data = raw as RawWeeklyMenu;
@@ -333,7 +333,7 @@ function parseWeeklyMenu(raw: unknown): WeeklyMenu {
                 WeeklyMenu["days"][number]["stations"][number]
             >();
 
-            // Station headers and foods share one API array.
+            // Station headers and foods share the same API array.
             for (const item of day.menu_items) {
                 if (item.is_station_header && item.station_id !== null) {
                     stations.set(item.station_id, {
@@ -349,10 +349,13 @@ function parseWeeklyMenu(raw: unknown): WeeklyMenu {
                 const stationId = item.station_id ?? -1;
 
                 if (!stations.has(stationId)) {
-                    stations.set(stationId, { name: "Other", items: [] });
+                    stations.set(stationId, {
+                        name: "Other",
+                        items: [],
+                    });
                 }
 
-                // Preserve the food record, preferring the menu item's price.
+                // Keep all food details, preferring the menu item's price.
                 stations.get(stationId)!.items.push({
                     ...item.food,
                     price: item.price ?? item.food.price ?? null,
@@ -371,12 +374,13 @@ function parseWeeklyMenu(raw: unknown): WeeklyMenu {
 }
 
 /**
- * Builds a Sunday-start cache key for a district, location, meal, and week.
- * @param district Nutrislice district slug.
+ * Identifies the Sunday-start week used by the menu cache.
+ *
+ * @param district Nutrislice district.
  * @param locationId Dining location ID.
  * @param mealTypeId Meal type ID.
- * @param date Requested date in YYYY-MM-DD format.
- * @returns A unique weekly menu cache key.
+ * @param date Requested date.
+ * @returns Weekly cache key.
  */
 function getMenuCacheKey(
     district: string,
@@ -391,12 +395,13 @@ function getMenuCacheKey(
 }
 
 /**
- * Fetches and parses one meal type's full week without updating the cache.
- * @param district Nutrislice district slug.
+ * Fetches and parses a full week of dining data.
+ *
+ * @param district Nutrislice district.
  * @param locationId Dining location ID.
  * @param mealTypeId Meal type ID.
- * @param date Requested date in YYYY-MM-DD format.
- * @returns Weekly menu, or null if the request or parsing fails.
+ * @param date Requested date.
+ * @returns Weekly menu or null on failure.
  */
 async function getWeeklyMenu(
     district: string,
@@ -405,8 +410,9 @@ async function getWeeklyMenu(
     date: string,
 ): Promise<WeeklyMenu | null> {
     try {
-        // The Nutrislice response spans Sunday through Saturday.
+        // Nutrislice returns a Sunday–Saturday week for the requested Monday.
         const requestDate = new Date(`${date}T00:00:00Z`);
+
         requestDate.setUTCDate(
             requestDate.getUTCDate() - requestDate.getUTCDay() + 1,
         );
@@ -435,10 +441,48 @@ type CacheEntry<T> = {
     lastUpdatedAt: number;
 };
 
-/** Returns whether a cache entry is missing, fresh, or stale. */
-function getCacheStatus(cached?: {
-    lastUpdatedAt: number;
-}): "miss" | "fresh" | "stale" {
+/**
+ * Reads saved data from Cloudflare KV without contacting Nutrislice.
+ *
+ * @param key Unique cache key.
+ * @returns Cached data, or null if missing or expired.
+ */
+async function readCache<T>(key: string): Promise<CacheEntry<T> | null> {
+    return env.MENU_CACHE.get<CacheEntry<T>>(key, "json");
+}
+
+/**
+ * Stores a response in Cloudflare KV for up to 14 days.
+ * Data is considered stale after seven days, not immediately deleted.
+ *
+ * @param key Unique cache key.
+ * @param data Data to store.
+ * @returns Time at which the data was fetched.
+ */
+async function writeCache<T>(key: string, data: T): Promise<number> {
+    const lastUpdatedAt = Date.now();
+
+    try {
+        await env.MENU_CACHE.put(key, JSON.stringify({ data, lastUpdatedAt }), {
+            expirationTtl: KV_RETENTION_SECONDS,
+        });
+    } catch (error) {
+        // A cache failure must not hide successfully fetched menu data.
+        console.error("KV cache write failed:", error);
+    }
+
+    return lastUpdatedAt;
+}
+
+/**
+ * Checks freshness without fetching new Nutrislice data.
+ *
+ * @param cached Cache entry, if one exists.
+ * @returns Freshness status.
+ */
+function getCacheStatus(
+    cached: CacheEntry<unknown> | null,
+): "miss" | "fresh" | "stale" {
     if (!cached) return "miss";
 
     return Date.now() - cached.lastUpdatedAt >= CACHE_TTL_MS
@@ -446,7 +490,14 @@ function getCacheStatus(cached?: {
         : "fresh";
 }
 
-/** Returns the requested day or the entire cached week. */
+/**
+ * Selects a single day's menu or the complete week.
+ *
+ * @param menu Full weekly menu.
+ * @param date Requested date.
+ * @param fullWeek Whether all seven days are requested.
+ * @returns Selected menu.
+ */
 function selectMenuDays(
     menu: WeeklyMenu,
     date: string,
@@ -460,16 +511,20 @@ function selectMenuDays(
     };
 }
 
-// Caches and ongoing fetches are shared by requests in the same process.
-const locationCache = new Map<number, DiningLocation>();
-const districtCache = new Map<string, CacheEntry<DiningLocation[]>>();
-const inFlight = new Map<string, Promise<DiningLocation[] | null>>();
-const weeklyMenuCache = new Map<string, CacheEntry<WeeklyMenu>>();
-const inFlightMenus = new Map<string, Promise<WeeklyMenu | null>>();
+// Within one Worker instance, simultaneous requests share a fetch.
+// KV stores the completed response for other instances and future requests.
+const inFlight = new Map<
+    string,
+    Promise<CacheEntry<DiningLocation[]> | null>
+>();
+
+const inFlightMenus = new Map<string, Promise<CacheEntry<WeeklyMenu> | null>>();
 
 /**
- * Creates a fresh MCP tool registry for each stateless HTTP request.
- * The data caches remain shared outside this function.
+ * Creates an MCP server and registers its four tools.
+ * Each HTTP request receives a new MCP server, while KV stores shared data.
+ *
+ * @returns Configured MCP server.
  */
 function createServer(): McpServer {
     const server = new McpServer(
@@ -482,7 +537,6 @@ function createServer(): McpServer {
         },
     );
 
-    // MCP clients discover and invoke the four tools registered below.
     server.registerTool(
         "check-location-cache",
         {
@@ -507,9 +561,11 @@ function createServer(): McpServer {
             },
         },
         async ({ district_name }) => {
-            const cached = districtCache.get(district_name);
+            // The cache-check tool only reads KV.
+            const cached = await readCache<DiningLocation[]>(
+                `district:${district_name}`,
+            );
 
-            // Check freshness without contacting Nutrislice.
             const status = getCacheStatus(cached);
 
             return {
@@ -552,19 +608,30 @@ function createServer(): McpServer {
             },
         },
         async ({ district_name }) => {
-            // Share an ongoing fetch when multiple users request one district.
+            // Concurrent callers share both the API fetch and KV write.
             let request = inFlight.get(district_name);
 
             if (!request) {
-                request = getDiningLocations(district_name).finally(() =>
-                    inFlight.delete(district_name),
-                );
+                request = getDiningLocations(district_name)
+                    .then(async (data) =>
+                        data === null
+                            ? null
+                            : {
+                                  data,
+                                  lastUpdatedAt: await writeCache(
+                                      `district:${district_name}`,
+                                      data,
+                                  ),
+                              },
+                    )
+                    .finally(() => inFlight.delete(district_name));
+
                 inFlight.set(district_name, request);
             }
 
-            const locations = await request;
+            const cached = await request;
 
-            if (locations === null) {
+            if (cached === null) {
                 return {
                     content: [
                         {
@@ -576,18 +643,6 @@ function createServer(): McpServer {
                 };
             }
 
-            // Update the cache only after a successful fetch.
-            const lastUpdatedAt = Date.now();
-
-            districtCache.set(district_name, {
-                data: locations,
-                lastUpdatedAt,
-            });
-
-            for (const location of locations) {
-                locationCache.set(location.id, location);
-            }
-
             return {
                 content: [
                     {
@@ -595,9 +650,9 @@ function createServer(): McpServer {
                         text: JSON.stringify({
                             source: "api",
                             lastUpdatedAt: new Date(
-                                lastUpdatedAt,
+                                cached.lastUpdatedAt,
                             ).toISOString(),
-                            locations,
+                            locations: cached.data,
                         }),
                     },
                 ],
@@ -641,7 +696,7 @@ function createServer(): McpServer {
                 "Use location and meal IDs from get-locations. " +
                 "On a miss or a stale entry (7+ days), call get-weekly-menu. " +
                 "On a fresh entry, use cached data and offer an optional refresh. " +
-                "No network request is made by this tool.",
+                "Never fetches Nutrislice data.",
             inputSchema: menuInputSchema,
             annotations: {
                 readOnlyHint: true,
@@ -664,9 +719,8 @@ function createServer(): McpServer {
                 date,
             );
 
-            const cached = weeklyMenuCache.get(key);
-
-            // One cache entry covers a full Sunday–Saturday menu week.
+            // The stored entry contains the complete weekly menu.
+            const cached = await readCache<WeeklyMenu>(`menu:${key}`);
             const status = getCacheStatus(cached);
 
             return {
@@ -720,7 +774,7 @@ function createServer(): McpServer {
                 date,
             );
 
-            // Concurrent requests for the same week share one API fetch.
+            // Share the fetch and KV write within the same Worker instance.
             let request = inFlightMenus.get(key);
 
             if (!request) {
@@ -729,15 +783,30 @@ function createServer(): McpServer {
                     location_id,
                     meal_type_id,
                     date,
-                ).finally(() => inFlightMenus.delete(key));
+                )
+                    .then(async (data) =>
+                        data === null
+                            ? null
+                            : {
+                                  data,
+                                  lastUpdatedAt: await writeCache(
+                                      `menu:${key}`,
+                                      data,
+                                  ),
+                              },
+                    )
+                    .finally(() => inFlightMenus.delete(key));
 
                 inFlightMenus.set(key, request);
             }
 
-            const menu = await request;
+            const cached = await request;
 
-            // A shared response must include each caller's requested date.
-            if (menu === null || !menu.days.some((day) => day.date === date)) {
+            // Even when sharing a fetch, each caller needs its requested date.
+            if (
+                cached === null ||
+                !cached.data.days.some((day) => day.date === date)
+            ) {
                 return {
                     content: [
                         {
@@ -749,14 +818,7 @@ function createServer(): McpServer {
                 };
             }
 
-            // Store the full week; filter only the response sent to the caller.
-            const lastUpdatedAt = Date.now();
-
-            weeklyMenuCache.set(key, {
-                data: menu,
-                lastUpdatedAt,
-            });
-
+            // KV stores all seven days; filter only what we return to the client.
             return {
                 content: [
                     {
@@ -764,9 +826,9 @@ function createServer(): McpServer {
                         text: JSON.stringify({
                             source: "api",
                             lastUpdatedAt: new Date(
-                                lastUpdatedAt,
+                                cached.lastUpdatedAt,
                             ).toISOString(),
-                            menu: selectMenuDays(menu, date, full_week),
+                            menu: selectMenuDays(cached.data, date, full_week),
                         }),
                     },
                 ],
@@ -777,89 +839,29 @@ function createServer(): McpServer {
     return server;
 }
 
-/**
- * Starts the HTTP endpoint for MCP clients.
- * The hosting platform should provide HTTPS when deployed publicly.
- */
-async function main(): Promise<void> {
-    const host = process.env.HOST ?? "127.0.0.1";
-    const port = Number(process.env.PORT ?? 3000);
-    const configuredHosts = process.env.ALLOWED_HOSTS;
-
-    // Public binding requires an explicit list of accepted hostnames.
-    if (
-        host !== "127.0.0.1" &&
-        host !== "localhost" &&
-        host !== "::1" &&
-        !configuredHosts
-    ) {
-        throw new Error(
-            "Set ALLOWED_HOSTS before binding to a public interface",
-        );
-    }
-
-    const allowedHosts = configuredHosts
-        ? configuredHosts
-              .split(",")
-              .map((value) => value.trim())
-              .filter(Boolean)
-        : ["localhost", "127.0.0.1", "[::1]"];
-
-    if (allowedHosts.length === 0) {
-        throw new Error("ALLOWED_HOSTS must not be empty");
-    }
-
-    const validateHost = hostHeaderValidation(allowedHosts);
-    const validateOrigin = originValidation(allowedHosts);
-
-    // The MCP SDK processes protocol requests and limits incoming body size.
-    const handleMcp = toNodeHandler(
-        createMcpHandler(createServer, {
-            maxRequestBodySize: MAX_MCP_REQUEST_BYTES,
-        }),
-        {
-            maxRequestBodySize: MAX_MCP_REQUEST_BYTES,
-        },
-    );
-
-    const httpServer = createHttpServer((req, res) => {
-        // Health checks don't invoke MCP tools or Nutrislice.
-        if (req.url === "/healthz" && req.method === "GET") {
-            res.writeHead(200).end("ok");
-            return;
-        }
-
-        if (req.url?.split("?")[0] !== "/mcp") {
-            res.writeHead(404).end("Not Found");
-            return;
-        }
-
-        // Validate hosts and browser origins before processing MCP messages.
-        if (!validateHost(req, res) || !validateOrigin(req, res)) {
-            return;
-        }
-
-        // No global rate counter or concurrency cap blocks other users.
-        void handleMcp(req, res).catch((error: unknown) => {
-            console.error("MCP request failed:", error);
-
-            if (!res.headersSent) {
-                res.writeHead(500).end("Internal Server Error");
-            } else {
-                res.destroy();
-            }
-        });
-    });
-
-    await new Promise<void>((resolve, reject) => {
-        httpServer.once("error", reject);
-        httpServer.listen(port, host, resolve);
-    });
-
-    console.error(`Nutrislice MCP listening at http://${host}:${port}/mcp`);
-}
-
-main().catch((error: unknown) => {
-    console.error("Failed to start Nutrislice MCP server:", error);
-    process.exitCode = 1;
+// Cloudflare provides HTTPS and passes requests directly to the MCP handler.
+const handleMcp = createMcpHandler(createServer, {
+    maxRequestBodySize: MAX_MCP_REQUEST_BYTES,
 });
+
+export default {
+    fetch(
+        request: Request,
+        workerEnv: Env,
+        ctx: ExecutionContext,
+    ): Promise<Response> {
+        const path = new URL(request.url).pathname;
+
+        // Health checks don't invoke MCP tools or Nutrislice.
+        if (path === "/healthz" && request.method === "GET") {
+            return Promise.resolve(new Response("ok"));
+        }
+
+        if (path !== "/mcp") {
+            return Promise.resolve(new Response("Not Found", { status: 404 }));
+        }
+
+        // Handle stateless Streamable HTTP; no Node HTTP server is needed.
+        return handleMcp(request, workerEnv, ctx);
+    },
+};
