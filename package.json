@@ -1,0 +1,39 @@
+{
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.4.0",
+    "dotenv": "^18.0.10",
+    "tsc": "^2.0.4",
+    "tsx": "^4.23.15",
+    "zod": "^4.6.7"
+  },
+  "type": "module",
+  "name": "nutrislice-mcp-unofficial",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "server:build:": "tsc",
+    "server:build:watch:": "tsc --watch",
+    "server:dev": "tsx src/server.ts",
+    "server:inspect": "set DANGEROUSLY_OMIT_AUTH=true && npx @modelcontextprotocol/inspector npm run server:dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1paramveer/nutrislice-mcp-unofficial.git"
+  },
+  "keywords": [],
+  "author": "Paramveer Singh",
+  "license": "UNLICENSED",
+  "private": true,
+  "bugs": {
+    "url": "https://github.com/1paramveer/nutrislice-mcp-unofficial/issues"
+  },
+  "homepage": "https://github.com/1paramveer/nutrislice-mcp-unofficial#readme",
+  "description": "",
+  "files": [
+    "build"
+  ],
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
