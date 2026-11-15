@@ -67,6 +67,121 @@ type DiningLocation = {
     availableMeals: { id: number; name: string; slug: string }[];
 };
 
+// Food details are kept as provided by Nutrislice, including fields
+// that are not currently used by our menu summary.
+type FoodInfo = {
+    id: number;
+    name: string;
+    description: string;
+    subtext: string;
+    image_url: string | null;
+    image_alt_text: string | null;
+    hoverpic_url: string | null;
+    price: number | null;
+    ingredients: string | null;
+    food_category: string;
+    food_highlight_message: string | null;
+    file_url: string;
+    download_label: string;
+    rounded_nutrition_info: {
+        calories: number | null;
+        g_fat: number | null;
+        g_saturated_fat: number | null;
+        g_trans_fat: number | null;
+        mg_cholesterol: number | null;
+        g_carbs: number | null;
+        g_added_sugar: number | null;
+        g_sugar: number | null;
+        mg_potassium: number | null;
+        mg_sodium: number | null;
+        g_fiber: number | null;
+        g_protein: number | null;
+        mg_iron: number | null;
+        mg_calcium: number | null;
+        mg_vitamin_c: number | null;
+        iu_vitamin_a: number | null;
+        re_vitamin_a: number | null;
+        mcg_vitamin_a: number | null;
+        mg_vitamin_d: number | null;
+        mcg_vitamin_d: number | null;
+    } | null;
+    serving_size_info: {
+        serving_size_amount: string;
+        serving_size_unit: string;
+    } | null;
+    has_nutrition_info: boolean;
+    icons: {
+        food_icons: {
+            id: number;
+            synced_name: string;
+            enabled: boolean;
+            spotlight_enabled: boolean;
+            sprite: {
+                slug: string;
+                name: string;
+                help_text: string;
+                class_name: string;
+            } | null;
+            custom_icon_url: string | null;
+            custom_icon: number | null;
+            custom_spotlight_icon_url: string | null;
+            custom_spotlight_icon: number | null;
+            type: number;
+            behavior: number;
+            is_filter: boolean;
+            is_highlight: boolean;
+            is_digital_signage_only: boolean;
+            slug: string;
+            icon_slug: string | null;
+            spotlight_icon_slug: string | null;
+            name: string;
+            _synced_name: string;
+            help_text: string;
+            sort_order: number;
+            _enabled: boolean;
+            food_icon_group: number;
+        }[];
+        myplate_icons: unknown[];
+    };
+    icons_approved: boolean;
+    nested_foods: unknown[];
+    aggregated_data: {
+        price_adjustment: number;
+        icons_approved: boolean;
+        food_icons: unknown[];
+        calories: number;
+    };
+    food_sizes: unknown[];
+    ds_calories_override: string;
+    synced_id: string | null;
+    sync_placeholder: unknown;
+    has_options_or_sides: boolean;
+    digest: string;
+    pos_item_id: string;
+    smart_recipe_id: number | null;
+    has_subfoods: boolean;
+    meal_plan_price: number | null;
+    use_custom_sizes: boolean;
+    tags: number[];
+    synced_ordering_enabled: boolean;
+    ordering_enabled: boolean;
+    ordering_enabled_unlocked: boolean;
+};
+
+type WeeklyMenu = {
+    startDate: string;
+    menuTypeId: number;
+    sourceUpdatedAt: string | null;
+    days: {
+        date: string;
+        unpublished: boolean;
+        stations: {
+            name: string;
+            items: FoodInfo[];
+        }[];
+    }[];
+};
+
 type RawWeeklyMenu = {
     start_date: string;
     menu_type_id: string | number;
@@ -79,52 +194,7 @@ type RawWeeklyMenu = {
             is_station_header: boolean;
             text: string;
             price: number | null;
-            food: null | {
-                id: number;
-                name: string;
-                description: string;
-                price: number | null;
-                ingredients: string | null;
-                rounded_nutrition_info?: {
-                    calories?: number | null;
-                    g_protein?: number | null;
-                    g_carbs?: number | null;
-                    g_fat?: number | null;
-                } | null;
-                icons?: {
-                    food_icons?: {
-                        name: string;
-                        is_filter: boolean;
-                        is_highlight: boolean;
-                    }[];
-                };
-            };
-        }[];
-    }[];
-};
-
-type WeeklyMenu = {
-    startDate: string;
-    menuTypeId: number;
-    sourceUpdatedAt: string | null;
-    days: {
-        date: string;
-        unpublished: boolean;
-        stations: {
-            name: string;
-            items: {
-                id: number;
-                name: string;
-                description: string;
-                price: number | null;
-                ingredients: string | null;
-                calories: number | null;
-                protein: number | null;
-                carbs: number | null;
-                fat: number | null;
-                allergens: string[];
-                dietaryTags: string[];
-            }[];
+            food: FoodInfo | null;
         }[];
     }[];
 };
@@ -244,26 +314,10 @@ function parseWeeklyMenu(raw: unknown): WeeklyMenu {
                     stations.set(stationId, { name: "Other", items: [] });
                 }
 
-                const food = item.food;
-                const nutrition = food.rounded_nutrition_info;
-                const icons = food.icons?.food_icons ?? [];
-
+                // Preserve the full food record, preferring the menu item's price.
                 stations.get(stationId)!.items.push({
-                    id: food.id,
-                    name: food.name,
-                    description: food.description ?? "",
-                    price: item.price ?? food.price ?? null,
-                    ingredients: food.ingredients ?? null,
-                    calories: nutrition?.calories ?? null,
-                    protein: nutrition?.g_protein ?? null,
-                    carbs: nutrition?.g_carbs ?? null,
-                    fat: nutrition?.g_fat ?? null,
-                    allergens: icons
-                        .filter((icon) => icon.is_filter)
-                        .map((icon) => icon.name),
-                    dietaryTags: icons
-                        .filter((icon) => icon.is_highlight)
-                        .map((icon) => icon.name),
+                    ...item.food,
+                    price: item.price ?? item.food.price ?? null,
                 });
             }
 
