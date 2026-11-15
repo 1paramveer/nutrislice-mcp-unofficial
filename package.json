@@ -3,7 +3,6 @@
     "@modelcontextprotocol/node": "^2.1.2",
     "@modelcontextprotocol/server": "^2.4.0",
     "dotenv": "^18.0.10",
-    "tsc": "^2.0.4",
     "tsx": "^4.23.15",
     "zod": "^4.6.7"
   },
@@ -15,7 +14,7 @@
     "server:build:": "tsc",
     "server:build:watch:": "tsc --watch",
     "server:dev": "tsx src/server.ts",
-    "server:inspect": "set DANGEROUSLY_OMIT_AUTH=true && npx @modelcontextprotocol/inspector"
+    "server:inspect": "npx @modelcontextprotocol/inspector"
   },
   "repository": {
     "type": "git",

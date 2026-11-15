@@ -7,9 +7,16 @@ import {
 } from "@modelcontextprotocol/node";
 import { z } from "zod";
 
-// Cache lifetime: 7 days.
+// Keep a seven-day cache and basic limits on HTTP input and upstream waits.
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const UPSTREAM_TIMEOUT_MS = 20_000;
+const MAX_MCP_REQUEST_BYTES = 256 * 1024;
+
+// Accept the district slug as supplied; the destination is checked before fetching.
+const districtNameSchema = z.string().min(1);
+
 const days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+
 type RawDiningLocation = {
     id: number;
     name: string;
@@ -67,8 +74,7 @@ type DiningLocation = {
     availableMeals: { id: number; name: string; slug: string }[];
 };
 
-// Food details are kept as provided by Nutrislice, including fields
-// that are not currently used by our menu summary.
+// Keep the complete food information provided by Nutrislice.
 type FoodInfo = {
     id: number;
     name: string;
@@ -200,6 +206,40 @@ type RawWeeklyMenu = {
 };
 
 /**
+ * Fetches Nutrislice JSON with a timeout and a fixed API destination.
+ * This prevents malformed district names from sending requests elsewhere.
+ *
+ * @param url Nutrislice API URL.
+ * @returns Parsed API response.
+ * @throws If the destination is invalid or the request fails.
+ */
+async function fetchNutrisliceJson(url: string): Promise<unknown> {
+    const target = new URL(url);
+
+    // Allow Nutrislice HTTPS API hosts only; do not follow redirects.
+    if (
+        target.protocol !== "https:" ||
+        !target.hostname.endsWith(".api.nutrislice.com") ||
+        target.username ||
+        target.password ||
+        target.port
+    ) {
+        throw new Error("Invalid Nutrislice API destination");
+    }
+
+    const response = await fetch(target, {
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+        redirect: "error",
+    });
+
+    if (!response.ok) {
+        throw new Error(`Nutrislice HTTP ${response.status}`);
+    }
+
+    return response.json();
+}
+
+/**
  * Fetches and normalizes dining locations for a district.
  * @param district_name Nutrislice district slug.
  * @returns Dining locations, or null if fetching or validation fails.
@@ -208,16 +248,11 @@ async function getDiningLocations(
     district_name: string,
 ): Promise<DiningLocation[] | null> {
     try {
-        const response = await fetch(
+        const raw = await fetchNutrisliceJson(
             `https://${district_name}.api.nutrislice.com/menu/api/schools`,
         );
 
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
         // Check the API response shape before converting it into dining locations.
-        const raw: unknown = await response.json();
         if (
             !Array.isArray(raw) ||
             raw.some(
@@ -229,6 +264,7 @@ async function getDiningLocations(
         ) {
             throw new Error("Unexpected dining locations response");
         }
+
         const data = raw as RawDiningLocation[];
         const locations: DiningLocation[] = [];
 
@@ -277,6 +313,7 @@ async function getDiningLocations(
  */
 function parseWeeklyMenu(raw: unknown): WeeklyMenu {
     const data = raw as RawWeeklyMenu;
+
     if (
         !data ||
         !Array.isArray(data.days) ||
@@ -296,7 +333,7 @@ function parseWeeklyMenu(raw: unknown): WeeklyMenu {
                 WeeklyMenu["days"][number]["stations"][number]
             >();
 
-            // Station headers and food items share the same menu_items array.
+            // Station headers and foods share one API array.
             for (const item of day.menu_items) {
                 if (item.is_station_header && item.station_id !== null) {
                     stations.set(item.station_id, {
@@ -310,11 +347,12 @@ function parseWeeklyMenu(raw: unknown): WeeklyMenu {
                 if (!item.food) continue;
 
                 const stationId = item.station_id ?? -1;
+
                 if (!stations.has(stationId)) {
                     stations.set(stationId, { name: "Other", items: [] });
                 }
 
-                // Preserve the full food record, preferring the menu item's price.
+                // Preserve the food record, preferring the menu item's price.
                 stations.get(stationId)!.items.push({
                     ...item.food,
                     price: item.price ?? item.food.price ?? null,
@@ -348,6 +386,7 @@ function getMenuCacheKey(
 ): string {
     const week = new Date(`${date}T00:00:00Z`);
     week.setUTCDate(week.getUTCDate() - week.getUTCDay());
+
     return `${district}:${locationId}:${mealTypeId}:${week.toISOString().slice(0, 10)}`;
 }
 
@@ -366,24 +405,22 @@ async function getWeeklyMenu(
     date: string,
 ): Promise<WeeklyMenu | null> {
     try {
-        // The tested Nutrislice response spans Sunday through Saturday.
+        // The Nutrislice response spans Sunday through Saturday.
         const requestDate = new Date(`${date}T00:00:00Z`);
         requestDate.setUTCDate(
             requestDate.getUTCDate() - requestDate.getUTCDay() + 1,
         );
+
         const [year, month, day] = requestDate
             .toISOString()
             .slice(0, 10)
             .split("-");
-        const response = await fetch(
+
+        const raw = await fetchNutrisliceJson(
             `https://${district}.api.nutrislice.com/menu/api/weeks/school/${locationId}/menu-type/${mealTypeId}/${year}/${month}/${day}/?format=json`,
         );
 
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        return parseWeeklyMenu(await response.json());
+        return parseWeeklyMenu(raw);
     } catch (error) {
         console.error(
             `Error fetching weekly menu for district "${district}", location ${locationId}, meal ${mealTypeId}, date ${date}:`,
@@ -393,13 +430,17 @@ async function getWeeklyMenu(
     }
 }
 
-type CacheEntry<T> = { data: T; lastUpdatedAt: number };
+type CacheEntry<T> = {
+    data: T;
+    lastUpdatedAt: number;
+};
 
 /** Returns whether a cache entry is missing, fresh, or stale. */
 function getCacheStatus(cached?: {
     lastUpdatedAt: number;
 }): "miss" | "fresh" | "stale" {
     if (!cached) return "miss";
+
     return Date.now() - cached.lastUpdatedAt >= CACHE_TTL_MS
         ? "stale"
         : "fresh";
@@ -419,21 +460,29 @@ function selectMenuDays(
     };
 }
 
-// Shared memory survives individual HTTP requests, but resets on server restart.
+// Caches and ongoing fetches are shared by requests in the same process.
 const locationCache = new Map<number, DiningLocation>();
 const districtCache = new Map<string, CacheEntry<DiningLocation[]>>();
 const inFlight = new Map<string, Promise<DiningLocation[] | null>>();
 const weeklyMenuCache = new Map<string, CacheEntry<WeeklyMenu>>();
 const inFlightMenus = new Map<string, Promise<WeeklyMenu | null>>();
 
+/**
+ * Creates a fresh MCP tool registry for each stateless HTTP request.
+ * The data caches remain shared outside this function.
+ */
 function createServer(): McpServer {
-    // Register the tools that MCP clients can discover and invoke.
-    const server = new McpServer({
-        name: "nutrislice-mcp-unofficial",
-        version: "1.0.0",
-        capabilities: { resources: {}, tools: {}, prompts: {} },
-    });
+    const server = new McpServer(
+        {
+            name: "nutrislice-mcp-unofficial",
+            version: "1.0.0",
+        },
+        {
+            capabilities: { tools: {} },
+        },
+    );
 
+    // MCP clients discover and invoke the four tools registered below.
     server.registerTool(
         "check-location-cache",
         {
@@ -446,12 +495,9 @@ function createServer(): McpServer {
                 "mention that schedules may change, and offer an optional refresh. " +
                 "Never fetch data through this tool.",
             inputSchema: z.object({
-                district_name: z
-                    .string()
-                    .min(1)
-                    .describe(
-                        "Nutrislice district slug (e.g., 'wsu' from wsu.nutrislice.edu)",
-                    ),
+                district_name: districtNameSchema.describe(
+                    "Nutrislice district slug (e.g., 'wsu' from wsu.nutrislice.edu)",
+                ),
             }),
             annotations: {
                 readOnlyHint: true,
@@ -462,7 +508,8 @@ function createServer(): McpServer {
         },
         async ({ district_name }) => {
             const cached = districtCache.get(district_name);
-            // Read cached data only; fetching is a separate tool call.
+
+            // Check freshness without contacting Nutrislice.
             const status = getCacheStatus(cached);
 
             return {
@@ -493,12 +540,9 @@ function createServer(): McpServer {
                 "Avoid unnecessary API requests. Report the last update time " +
                 "and tell the user when fresh data was retrieved.",
             inputSchema: z.object({
-                district_name: z
-                    .string()
-                    .min(1)
-                    .describe(
-                        "Enter your District name (e.g., 'wsu' from wsu.nutrislice.edu)",
-                    ),
+                district_name: districtNameSchema.describe(
+                    "Enter your District name (e.g., 'wsu' from wsu.nutrislice.edu)",
+                ),
             }),
             annotations: {
                 readOnlyHint: true,
@@ -508,8 +552,9 @@ function createServer(): McpServer {
             },
         },
         async ({ district_name }) => {
-            // Share an ongoing request, then clear it when the promise settles.
+            // Share an ongoing fetch when multiple users request one district.
             let request = inFlight.get(district_name);
+
             if (!request) {
                 request = getDiningLocations(district_name).finally(() =>
                     inFlight.delete(district_name),
@@ -518,6 +563,7 @@ function createServer(): McpServer {
             }
 
             const locations = await request;
+
             if (locations === null) {
                 return {
                     content: [
@@ -530,12 +576,14 @@ function createServer(): McpServer {
                 };
             }
 
-            // Only successful responses replace cached data.
+            // Update the cache only after a successful fetch.
             const lastUpdatedAt = Date.now();
+
             districtCache.set(district_name, {
                 data: locations,
                 lastUpdatedAt,
             });
+
             for (const location of locations) {
                 locationCache.set(location.id, location);
             }
@@ -558,10 +606,9 @@ function createServer(): McpServer {
     );
 
     const menuInputSchema = z.object({
-        district_name: z
-            .string()
-            .min(1)
-            .describe("Nutrislice district slug (e.g., 'wsu')"),
+        district_name: districtNameSchema.describe(
+            "Nutrislice district slug (e.g., 'wsu')",
+        ),
         location_id: z
             .number()
             .int()
@@ -616,8 +663,10 @@ function createServer(): McpServer {
                 meal_type_id,
                 date,
             );
+
             const cached = weeklyMenuCache.get(key);
-            // Each weekly cache entry is shared across its seven dates.
+
+            // One cache entry covers a full Sunday–Saturday menu week.
             const status = getCacheStatus(cached);
 
             return {
@@ -671,8 +720,9 @@ function createServer(): McpServer {
                 date,
             );
 
-            // Deduplicate fetches for the same district, location, meal, and week.
+            // Concurrent requests for the same week share one API fetch.
             let request = inFlightMenus.get(key);
+
             if (!request) {
                 request = getWeeklyMenu(
                     district_name,
@@ -680,11 +730,13 @@ function createServer(): McpServer {
                     meal_type_id,
                     date,
                 ).finally(() => inFlightMenus.delete(key));
+
                 inFlightMenus.set(key, request);
             }
 
             const menu = await request;
-            // Each caller must receive the date it requested, even with shared fetches.
+
+            // A shared response must include each caller's requested date.
             if (menu === null || !menu.days.some((day) => day.date === date)) {
                 return {
                     content: [
@@ -697,9 +749,13 @@ function createServer(): McpServer {
                 };
             }
 
-            // Cache the entire week; filter only the tool's returned data.
+            // Store the full week; filter only the response sent to the caller.
             const lastUpdatedAt = Date.now();
-            weeklyMenuCache.set(key, { data: menu, lastUpdatedAt });
+
+            weeklyMenuCache.set(key, {
+                data: menu,
+                lastUpdatedAt,
+            });
 
             return {
                 content: [
@@ -721,31 +777,77 @@ function createServer(): McpServer {
     return server;
 }
 
-async function main() {
+/**
+ * Starts the HTTP endpoint for MCP clients.
+ * The hosting platform should provide HTTPS when deployed publicly.
+ */
+async function main(): Promise<void> {
     const host = process.env.HOST ?? "127.0.0.1";
     const port = Number(process.env.PORT ?? 3000);
-    const allowedHosts = process.env.ALLOWED_HOSTS?.split(",")
-        .map((value) => value.trim())
-        .filter(Boolean) ?? ["localhost", "127.0.0.1", "[::1]"];
+    const configuredHosts = process.env.ALLOWED_HOSTS;
+
+    // Public binding requires an explicit list of accepted hostnames.
+    if (
+        host !== "127.0.0.1" &&
+        host !== "localhost" &&
+        host !== "::1" &&
+        !configuredHosts
+    ) {
+        throw new Error(
+            "Set ALLOWED_HOSTS before binding to a public interface",
+        );
+    }
+
+    const allowedHosts = configuredHosts
+        ? configuredHosts
+              .split(",")
+              .map((value) => value.trim())
+              .filter(Boolean)
+        : ["localhost", "127.0.0.1", "[::1]"];
+
+    if (allowedHosts.length === 0) {
+        throw new Error("ALLOWED_HOSTS must not be empty");
+    }
 
     const validateHost = hostHeaderValidation(allowedHosts);
     const validateOrigin = originValidation(allowedHosts);
-    // The SDK converts HTTP requests into MCP protocol messages and tool calls.
-    const handleMcp = toNodeHandler(createMcpHandler(createServer));
+
+    // The MCP SDK processes protocol requests and limits incoming body size.
+    const handleMcp = toNodeHandler(
+        createMcpHandler(createServer, {
+            maxRequestBodySize: MAX_MCP_REQUEST_BYTES,
+        }),
+        {
+            maxRequestBodySize: MAX_MCP_REQUEST_BYTES,
+        },
+    );
 
     const httpServer = createHttpServer((req, res) => {
-        // Serve MCP only at /mcp after checking the request origin.
+        // Health checks don't invoke MCP tools or Nutrislice.
+        if (req.url === "/healthz" && req.method === "GET") {
+            res.writeHead(200).end("ok");
+            return;
+        }
+
         if (req.url?.split("?")[0] !== "/mcp") {
             res.writeHead(404).end("Not Found");
             return;
         }
 
-        if (!validateHost(req, res) || !validateOrigin(req, res)) return;
+        // Validate hosts and browser origins before processing MCP messages.
+        if (!validateHost(req, res) || !validateOrigin(req, res)) {
+            return;
+        }
 
+        // No global rate counter or concurrency cap blocks other users.
         void handleMcp(req, res).catch((error: unknown) => {
             console.error("MCP request failed:", error);
-            if (!res.headersSent) res.writeHead(500);
-            res.end("Internal Server Error");
+
+            if (!res.headersSent) {
+                res.writeHead(500).end("Internal Server Error");
+            } else {
+                res.destroy();
+            }
         });
     });
 
