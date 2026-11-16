@@ -4,6 +4,8 @@ import type {
     DiningLocation,
     RawWeeklyMenu,
     WeeklyMenu,
+    MenuSummary,
+    FoodInfo,
     CacheEntry,
 } from "./types.ts";
 
@@ -298,22 +300,75 @@ export function getCacheStatus(
 }
 
 /**
- * Selects a single day's menu or the complete week.
+ * Returns a compact menu listing. Full food records remain in KV.
  *
  * @param menu Full weekly menu.
  * @param date Requested date.
  * @param fullWeek Whether all seven days are requested.
- * @returns Selected menu.
+ * @returns Menu with short item summaries.
  */
 export function selectMenuDays(
     menu: WeeklyMenu,
     date: string,
     fullWeek?: boolean,
-): WeeklyMenu {
+): MenuSummary {
+    const selectedDays = fullWeek
+        ? menu.days
+        : menu.days.filter((day) => day.date === date);
+
     return {
-        ...menu,
-        days: fullWeek
-            ? menu.days
-            : menu.days.filter((day) => day.date === date),
+        startDate: menu.startDate,
+        menuTypeId: menu.menuTypeId,
+        sourceUpdatedAt: menu.sourceUpdatedAt,
+        days: selectedDays.map((day) => ({
+            date: day.date,
+            unpublished: day.unpublished,
+            stations: day.stations.map((station) => ({
+                name: station.name,
+                items: station.items.map((food) => ({
+                    id: food.id,
+                    name: food.name,
+                    price: food.price,
+                    calories: food.rounded_nutrition_info?.calories ?? null,
+                    protein: food.rounded_nutrition_info?.g_protein ?? null,
+                    foodIcons:
+                        food.icons?.food_icons?.map((icon) => icon.name) ?? [],
+                })),
+            })),
+        })),
     };
+}
+
+/**
+ * Finds one food in an already cached full menu. Never calls Nutrislice.
+ *
+ * @returns Food and cache timestamp, or null if unavailable.
+ */
+export async function getCachedFood(
+    district: string,
+    locationId: number,
+    mealTypeId: number,
+    date: string,
+    foodId: number,
+): Promise<{ food: FoodInfo; lastUpdatedAt: number } | null> {
+    const key = getMenuCacheKey(district, locationId, mealTypeId, date);
+    const cached = await readCache<WeeklyMenu>(`menu:${key}`);
+
+    if (!cached) return null;
+
+    const day = cached.data.days.find((day) => day.date === date);
+    if (!day) return null;
+
+    for (const station of day.stations) {
+        const food = station.items.find((item) => item.id === foodId);
+
+        if (food) {
+            return {
+                food,
+                lastUpdatedAt: cached.lastUpdatedAt,
+            };
+        }
+    }
+
+    return null;
 }

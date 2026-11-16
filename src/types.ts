@@ -169,6 +169,28 @@ export type WeeklyMenu = {
     }[];
 };
 
+// Only this smaller shape is returned by the menu tools.
+export type MenuSummary = {
+    startDate: string;
+    menuTypeId: number;
+    sourceUpdatedAt: string | null;
+    days: {
+        date: string;
+        unpublished: boolean;
+        stations: {
+            name: string;
+            items: {
+                id: number;
+                name: string;
+                price: number | null;
+                calories: number | null;
+                protein: number | null;
+                foodIcons: string[];
+            }[];
+        }[];
+    }[];
+};
+
 export type RawWeeklyMenu = {
     start_date: string;
     menu_type_id: string | number;
