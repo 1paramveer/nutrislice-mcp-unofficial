@@ -9,7 +9,7 @@
   },
   "type": "module",
   "name": "nutrislice-mcp-unofficial",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "main": "index.js",
   "scripts": {
     "server:build:": "tsc",
@@ -24,7 +24,7 @@
     "url": "git+https://github.com/1paramveer/nutrislice-mcp-unofficial.git"
   },
   "keywords": [],
-  "author": "Paramveer Singh",
+  "author": "Paramveer S.",
   "license": "UNLICENSED",
   "private": true,
   "bugs": {
