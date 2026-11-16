@@ -270,27 +270,61 @@
         Authentication: None
       </p>
 
-      <h3>ChatGPT</h3>
+      <h3>ChatGPT Plugin</h3>
 
       <ol>
         <li>
           Open
           <a href="https://chatgpt.com/plugins"
-             target="_blank" rel="noopener noreferrer">ChatGPT Plugins</a>.
+             target="_blank" rel="noopener noreferrer">ChatGPT Plugins</a>
+          in your web browser.
         </li>
-        <li>Select Add custom MCP server.</li>
-        <li>Enter the name <code>nutrislice</code> and paste the URL.</li>
-        <li>Select no authentication and save the connection.</li>
-        <li>Enable the plugin in your conversation.</li>
+        <li>
+          Select the + button, then Add custom MCP server.
+        </li>
+        <li>
+          Enter the name <code>nutrislice</code>
+          and paste the server URL under Connection.
+        </li>
+        <li>
+          Under Authentication, select No authentication.
+          Do not select OAuth or OAuth or no authentication.
+        </li>
+        <li>
+          ChatGPT will display a warning about connecting to a custom MCP server.
+          Review the warning and verify the server URL.
+          If you trust the connection, select
+          I understand and want to continue.
+        </li>
+        <li>
+          Select Create as a plugin.
+          Review the tools discovered from the server.
+        </li>
+        <li>
+          Install the newly created plugin from your Plugins page.
+        </li>
+        <li>
+          Open a new ChatGPT conversation, select the plugin using @,
+          and begin asking questions.
+        </li>
       </ol>
 
       <p class="muted">
+        ChatGPT may ask you to approve tool usage.
+        Review the requested action before allowing it.
+        Nutrislice provides read-only dining information
+        and does not require access to your personal accounts.
+      </p>
+
+      <p class="muted">
         Custom MCP support depends on your ChatGPT plan or workspace.
+        If Add custom MCP server is unavailable, your account may not
+        have permission to create custom plugins.
         <a href="https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt"
            target="_blank" rel="noopener noreferrer">Setup documentation</a>.
       </p>
 
-      <h3>Claude</h3>
+      <h3>Claude Connector</h3>
 
       <ol>
         <li>
@@ -298,13 +332,45 @@
           <a href="https://claude.ai"
              target="_blank" rel="noopener noreferrer">Claude</a>.
         </li>
-        <li>Go to Customize → Connectors.</li>
-        <li>Select Add custom connector.</li>
-        <li>Enter the name <code>nutrislice</code> and paste the URL.</li>
-        <li>Save and enable the connector.</li>
+        <li>
+          Go to Customize → Connectors.
+        </li>
+        <li>
+          Select + Add → Custom → Web, or Add custom connector,
+          depending on the interface shown.
+        </li>
+        <li>
+          Enter the name <code>nutrislice</code>
+          and paste the server URL.
+          Select Continue.
+        </li>
+        <li>
+          Review the detected authentication settings.
+          Under Authentication, select No sign in.
+          Do not select Sign in now or Sign in when needed.
+        </li>
+        <li>
+          No OAuth client, API key, request headers, or
+          authorization credentials are needed.
+        </li>
+        <li>
+          Select Add to finish creating the connector.
+        </li>
+        <li>
+          In a Claude conversation, open + → Connectors
+          and enable the nutrislice connector.
+        </li>
       </ol>
 
       <p class="muted">
+        Claude may warn that custom connectors have not been verified
+        by Anthropic. Review the warning and confirm that the server URL
+        matches the address above before connecting.
+        Only enable external connectors you trust.
+      </p>
+
+      <p class="muted">
+        Custom connectors are subject to account and workspace permissions.
         <a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp"
            target="_blank" rel="noopener noreferrer">Setup documentation</a>.
       </p>
